@@ -5,6 +5,7 @@ BTC 虛擬資金自動交易機器人 (Paper Trading) - 雲端單次執行版
 - 虛擬本金 100 USDT,多空雙向 (做多/做空,1 倍無槓桿),不會動用真錢
 - 做多:EMA20>EMA50 且 RSI 回升穿越 45;做空:EMA20<EMA50 且 RSI 回落跌破 55
 - 停損 1.5 倍 ATR,風報比 1:2;15 分鐘 K,24 小時運作 (加密貨幣全年無休)
+- Telegram 傳 /status 可查目前持倉與勝率(下次排程執行時回覆);持倉每 3 小時自動回報浮動損益
 - 手機/電腦本機常駐也可用:python btc_paper_bot.py --loop
 - 測試通知:python btc_paper_bot.py --test
 """
@@ -122,6 +123,7 @@ def open_position(s, side, price, atr, reason):
     s["cash"] -= qty * price * (1 + FEE)  # 1 倍、無槓桿:鎖定等值保證金 + 手續費
     s["position"] = {"side": side, "entry": price, "qty": qty, "stop": stop, "target": target,
                      "time": now(), "ts": int(time.time() * 1000), "reason": reason}
+    s["last_report"] = time.time()
     save_state(s)
     icon, name = ("🟢", "做多") if side == "long" else ("🔴", "做空")
     notify(f"{icon} 【虛擬開倉】BTC {name}\n進場價:{price:,.2f}\n停損:{stop:,.2f}\n停利:{target:,.2f}\n"
@@ -167,11 +169,79 @@ def check_exit(s, df):
         close_position(s, price, "觸及停利")
 
 
+REPORT_HOURS = 3  # 持倉期間每幾小時回報一次浮動盈虧
+
+
+def floating_pnl(p, price):
+    d = 1 if p.get("side", "long") == "long" else -1
+    gross = (price - p["entry"]) * p["qty"] * d
+    fees = p["qty"] * p["entry"] * FEE + p["qty"] * price * FEE
+    return gross - fees
+
+
+def position_text(s, price):
+    p = s["position"]
+    name = "做多" if p.get("side", "long") == "long" else "做空"
+    pnl = floating_pnl(p, price)
+    return (f"持倉:BTC {name}(開倉 {p['time']})\n進場:{p['entry']:,.2f} 現價:{price:,.2f}\n"
+            f"停損:{p['stop']:,.2f} 停利:{p['target']:,.2f}\n"
+            f"浮動損益:{pnl:+.2f} USDT {'📈' if pnl > 0 else '📉'}")
+
+
+def status_text(s, price):
+    total = s["wins"] + s["losses"]
+    wr = f"{s['wins'] / total * 100:.1f}%" if total else "尚無完成交易"
+    equity = s["cash"]
+    if s["position"]:
+        p = s["position"]
+        equity += p["qty"] * p["entry"] + floating_pnl(p, price) + p["qty"] * p["entry"] * FEE
+    body = position_text(s, price) if s["position"] else "目前空手,等待訊號"
+    return (f"📊 【目前狀態】BTC 現價 {price:,.2f}\n{body}\n"
+            f"資產:約 {equity:.2f} USDT(本金 {START_CASH:.0f},{equity - START_CASH:+.2f})\n"
+            f"累計:{s['wins']} 勝 / {s['losses']} 敗,勝率 {wr}")
+
+
+def get_tg_updates(offset):
+    r = requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
+                     params={"offset": offset, "timeout": 0}, timeout=10)
+    return r.json().get("result", []) if r.status_code == 200 else []
+
+
+def handle_commands(s, price):
+    """讀取 Telegram 訊息,收到 /status 就回報。只回應自己的 chat id。"""
+    if not (TG_TOKEN and TG_CHAT_ID):
+        return
+    try:
+        wanted = False
+        for u in get_tg_updates(s.get("tg_offset", 0)):
+            s["tg_offset"] = u["update_id"] + 1
+            m = u.get("message") or {}
+            if str(m.get("chat", {}).get("id")) == str(TG_CHAT_ID) and \
+                    str(m.get("text", "")).strip().lower().startswith("/status"):
+                wanted = True
+        save_state(s)
+        if wanted:
+            notify(status_text(s, price))
+    except Exception as e:
+        print("讀取指令失敗:", e)
+
+
+def maybe_report(s, price):
+    if s["position"] and time.time() - s.get("last_report", 0) >= REPORT_HOURS * 3600:
+        s["last_report"] = time.time()
+        save_state(s)
+        notify("⏱ 【持倉回報】\n" + position_text(s, price))
+
+
 def run_once():
     s = load_state()
     df = add_indicators(get_klines())
+    price = df.iloc[-1]["close"]
     if s["position"]:
         check_exit(s, df)
+    handle_commands(s, price)
+    if s["position"]:
+        maybe_report(s, price)
     if not s["position"]:
         bar = int(df.iloc[-2]["t"])
         if bar != s.get("last_bar"):
