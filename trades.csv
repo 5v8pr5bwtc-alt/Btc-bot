@@ -1,0 +1,2 @@
+open_time,close_time,side,entry,exit,pnl_usdt,result,reason,close_why
+2026-11-21 16:25,2026-11-21 20:02,做空,57729.0,58500.66,-1.4611,LOSS,"下降趨勢(EMA20 57423 < EMA50 58047),RSI 由 57.2 回落至 54.0,反彈結束轉弱",觸及停損
