@@ -1,0 +1,23 @@
+name: backtest
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "回測天數 (建議 30~90)"
+        default: "60"
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests pandas
+      - name: 回測
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python btc_paper_bot.py --backtest ${{ github.event.inputs.days }}
