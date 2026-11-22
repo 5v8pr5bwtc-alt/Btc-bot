@@ -3,36 +3,19 @@
   "position": null,
   "wins": 0,
   "losses": 2,
-  "last_bar": 1795345200000,
+  "last_bar": 1795347000000,
   "tg_offset": 127778734,
   "last_report": 1795324724.914903,
   "win": {
-    "start": 1795324726.1904182,
-    "bars": 24,
-    "flat": 6,
-    "weak": 16,
+    "start": 1795348690.1672168,
+    "bars": 0,
+    "flat": 0,
+    "weak": 0,
     "held": 0,
-    "stale": 2,
-    "best": {
-      "t": 1795325400000,
-      "side": "short",
-      "score": 4,
-      "hits": [
-        "EMA200 順勢",
-        "MACD 同向",
-        "量能放大",
-        "K 線確認"
-      ],
-      "misses": [
-        "RSI 反彈轉弱",
-        "斐波那契回撤區"
-      ],
-      "trend": "空頭"
-    },
+    "stale": 0,
+    "best": null,
     "opens": [],
-    "closes": [
-      "11-22 14:13 做空 整筆 虧 -2.61U(觸及停損)"
-    ]
+    "closes": []
   },
   "tier": {
     "high": [
