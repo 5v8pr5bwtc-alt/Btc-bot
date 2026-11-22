@@ -1,2 +1,2 @@
-open_time,close_time,side,entry,exit,pnl_usdt,result,reason,close_why
-2026-11-21 16:25,2026-11-21 20:02,做空,57729.0,58500.66,-1.4611,LOSS,"下降趨勢(EMA20 57423 < EMA50 58047),RSI 由 57.2 回落至 54.0,反彈結束轉弱",觸及停損
+open_time,close_time,side,leverage,score,tp_hit,entry,exit,pnl_usdt,result,close_why,reason
+2026-11-22 13:18,2026-11-22 14:13,做空,20,4,0,58810.01,59140.99,-2.6136,LOSS,觸及停損,空頭順勢做空 4/6 分|符合:EMA200 順勢、MACD 同向、量能放大、K 線確認|未符合:RSI 反彈轉弱、斐波那契回撤區
