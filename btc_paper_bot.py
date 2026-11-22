@@ -240,6 +240,144 @@ def tier_of(score):
     return "high" if score >= HIGH_SCORE else "mid"
 
 
+# ---------- 新手小教室 (每單附白話說明 + 複盤圖) ----------
+_CTX = {"df": None}
+
+EXPLAIN = {
+    "EMA200 順勢": "EMA200 是「長期平均價」。價格在它上方=大方向偏多,下方=偏空。順著大方向開單,通常比逆著來容易贏。",
+    "RSI 回檔轉強": "RSI 看最近漲跌的力道。跌到 45 以下是回檔、賣壓大;回到 45 以上代表賣壓退了、買盤回來,像彈簧壓到底後彈起。",
+    "RSI 反彈轉弱": "RSI 反彈到 55 以上是漲得有點急;再跌回 55 以下代表買盤退了,容易繼續往下。",
+    "MACD 同向": "MACD 看動能有沒有加速。MACD 線在訊號線的有利一側、柱子又在變長,代表你要的方向力道在增強。",
+    "斐波那契回撤區": "價格走完一大段後,常會回頭走 38%~62% 再繼續,這區叫黃金回撤區,很多人會在這裡進場,所以常有支撐或壓力。",
+    "量能放大": "成交量比平常大,代表有真金白銀在推,這根 K 線的方向比較可信。",
+    "K 線確認": "最後一根 K 線收在你要的方向(做多收漲、做空收跌),代表當下買賣雙方真的朝你這邊走。",
+}
+
+TIPS = [
+    "停損是「認錯價」,不是失敗。小虧是交易的成本,不讓小虧變大虧才是重點。",
+    "勝率高不等於賺錢,要看「賺的時候賺多少、虧的時候虧多少」。",
+    "上一單虧了,不要為了翻本把下一單放大,這是新手最常見的爆倉原因。",
+    "順勢交易:趨勢是你的朋友。盤整、均線糾纏時,空手觀望也是一種交易。",
+    "槓桿放大賺也放大賠。新手先用低倍數練習,看懂停損距離與爆倉距離再加。",
+    "先落袋一部分獲利,心理壓力會小很多,也比較不會把賺到的又吐回去。",
+    "每次開單前先問自己:停損在哪?虧了會虧多少?答不出來就不要開。",
+    "單一指標會騙人,多個條件同時指向同一方向,勝算才比較高。",
+]
+
+
+def lesson_open_text(side, trend, hits, misses, price, stop, liq, lev, margin):
+    long_ = side == "long"
+    nm = "做多(賭會漲)" if long_ else "做空(賭會跌)"
+    dist = abs(price - stop) / price * 100
+    liq_dist = abs(price - liq) / price * 100
+    loss = margin * dist / 100 * lev
+    L = ["📚 【小教室】這一單為什麼開?", "",
+         f"① 先看大方向:{trend}。EMA20(短期平均價)在 EMA50(中期平均價){'之上' if long_ else '之下'},"
+         f"代表價格最近在{'走高' if long_ else '走低'},所以只考慮{nm}。順著趨勢開單,比逆勢容易贏。", "",
+         f"② 再用 6 項確認來加分,這單符合 {len(hits)} 項:"]
+    L += [f"✔ {h}:{EXPLAIN.get(h, '')}" for h in hits]
+    if misses:
+        L.append("✘ 沒符合:" + "、".join(misses))
+    L += ["", "③ 開單前先想「會虧多少」:",
+          f"停損離進場 {dist:.2f}%,{lev}x 槓桿下,碰到停損大約虧掉這單保證金的 {dist * lev:.0f}%(約 {loss:.2f} USDT)。"
+          f"爆倉價離進場只有 {liq_dist:.2f}%" + ("——比停損還近,會先被爆倉!" if liq_dist < dist else "。"),
+          "", "👉 新手重點:先決定停損,再決定倉位大小;不要先想賺多少。"]
+    return "\n".join(L)
+
+
+def lesson_close_text(p, pnl, why, hit, s):
+    lev = p.get("lev", 1)
+    if why == "爆倉":
+        liq = abs(p["entry"] - p.get("liq", p["entry"])) / p["entry"] * 100
+        stp = abs(p["entry"] - p["stop"]) / p["entry"] * 100
+        what = (f"{lev}x 槓桿的爆倉距離只有約 {liq:.2f}%,停損距離是 {stp:.2f}%。價格逆行一點點就先被清掉,"
+                "保證金歸零。這是高槓桿最大的風險:停損還沒用到,就先被強制平倉了。")
+    elif why == "保本出場":
+        what = "TP1 先落袋後,價格回頭碰到保本停損,剩下的倉位沒賺沒賠,整筆仍小賺。這就是「先落袋、再移動停損」的好處。"
+    elif why == "移動停損出場":
+        what = "前面已經落袋 TP1、TP2,價格回頭後被移動停損收掉剩下的倉位,大部分獲利被留住了。"
+    elif why.startswith("觸及停利"):
+        what = "價格一路走到最遠的停利目標,趨勢延續得很漂亮。順勢加上分批停利,這是理想的結果。"
+    else:
+        what = ("價格往反方向走到你事先設好的認錯價,系統自動出場。這筆虧損在計畫內,"
+                "停損的用途就是不讓小虧變成大虧。")
+    total = s["wins"] + s["losses"]
+    L = [f"📚 【複盤小教室】這單{'賺' if pnl > 0 else '虧'} {pnl:+.2f} USDT", "",
+         f"發生什麼事:{what}"]
+    if p.get("hits") or p.get("score"):
+        L.append(f"開單時符合 {p.get('score', '?')}/{MAX_SCORE} 項確認。結果好壞不代表當初判斷對錯,"
+                 "要累積很多筆才看得出這套條件有沒有優勢。")
+    L += ["", "怎麼自己複習:打開下面的圖,看進場前價格是不是順著 EMA20/EMA50 走,"
+              "以及價格是怎麼碰到停損或停利的。",
+          "", f"💡 今日重點:{TIPS[(total - 1) % len(TIPS)]}"]
+    return "\n".join(L)
+
+
+def make_chart(p, exit_price, pnl, why, path="trade_chart.png"):
+    """畫複盤圖 (K 線 + EMA + 進場/停損/停利/出場)。圖上用英文標示避免字型問題。"""
+    df = _CTX.get("df")
+    if df is None:
+        return None
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        print("沒有 matplotlib,略過複盤圖:", e)
+        return None
+    before = df.index[df["t"] <= p["ts"]]
+    ent = int(before.max()) if len(before) else 0
+    a = max(0, ent - 40)
+    d = df.iloc[a:].reset_index(drop=True)
+    ent -= a
+    ex = len(d) - 1
+    for k in range(ent, len(d)):
+        if d.loc[k, "low"] <= exit_price <= d.loc[k, "high"]:
+            ex = k
+            break
+    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=110)
+    for k, r in d.iterrows():
+        col = "#d62728" if r["close"] >= r["open"] else "#2ca02c"
+        ax.plot([k, k], [r["low"], r["high"]], color=col, lw=0.8)
+        ax.add_patch(plt.Rectangle((k - 0.35, min(r["open"], r["close"])), 0.7,
+                                   max(abs(r["close"] - r["open"]), 1e-9), color=col))
+    ax.plot(d["ema20"], lw=1, color="#1f77b4", label="EMA20")
+    ax.plot(d["ema50"], lw=1, color="#ff7f0e", label="EMA50")
+    levels = [("Entry", p["entry"], "black", "-"), ("SL", p["stop"], "red", "--")]
+    levels += [(f"TP{k + 1}", tp, "green", ":") for k, tp in enumerate(p.get("tps", [p.get("target", p["entry"])]))]
+    for name, y, c, ls in levels:
+        ax.axhline(y, color=c, ls=ls, lw=0.9)
+        ax.text(len(d) - 0.5, y, f"{name} {y:,.0f} ", color=c, fontsize=7, va="bottom", ha="right")
+    side = p.get("side", "long")
+    ax.scatter([ent], [p["entry"]], marker="^" if side == "long" else "v", s=60, color="black", zorder=5)
+    ax.scatter([ex], [exit_price], marker="X", s=60, color="purple", zorder=5)
+    ys = [d["low"].min(), d["high"].max(), p["stop"]] + [y for _, y, _, _ in levels]
+    pad = (max(ys) - min(ys)) * 0.05
+    ax.set_ylim(min(ys) - pad, max(ys) + pad)
+    ax.set_xticks([])
+    ax.set_title(f"BTC 15m  {side.upper()} {p.get('lev', 1)}x   PnL {pnl:+.2f} USDT  ({'WIN' if pnl > 0 else 'LOSS'})",
+                 fontsize=10)
+    ax.legend(loc="upper left", fontsize=7)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return path
+
+
+def send_photo(path, caption=""):
+    if not (path and TG_TOKEN and TG_CHAT_ID):
+        return
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto",
+                              data={"chat_id": TG_CHAT_ID, "caption": caption[:1000]},
+                              files={"photo": f}, timeout=20)
+        if r.status_code != 200:
+            print("圖片發送失敗:", r.status_code, r.text)
+    except Exception as e:
+        print("圖片發送失敗:", e)
+
+
 def open_position(s, ev, price):
     side = ev["side"]
     stop, tps, fracs, liq = trade_levels(side, price, ev["atr"], LEVERAGE)
@@ -249,6 +387,7 @@ def open_position(s, ev, price):
     s["position"] = {"side": side, "entry": price, "qty": qty, "rem": qty, "margin": margin,
                      "lev": LEVERAGE, "stop": stop, "tps": tps, "fracs": fracs, "target": tps[-1],
                      "tp_hit": 0, "realized": 0.0, "liq": liq, "score": ev["score"],
+                     "hits": ev["hits"], "misses": ev["misses"], "trend": ev["trend"],
                      "time": now(), "ts": int(time.time() * 1000), "reason": reason}
     s["last_report"] = time.time()
     name = "做多" if side == "long" else "做空"
@@ -260,6 +399,10 @@ def open_position(s, ev, price):
     notify(f"{icon} 【虛擬開倉】BTC {name} {LEVERAGE}x\n進場價:{price:,.2f}\n停損:{stop:,.2f}\n{tp_lines}\n"
            f"爆倉價:{liq:,.2f}\n保證金:{margin:.2f} USDT(倉位 {notional:.2f})\n"
            f"信心:{ev['score']}/{MAX_SCORE}({tag})\n依據:{reason}")
+    try:
+        notify(lesson_open_text(side, ev["trend"], ev["hits"], ev["misses"], price, stop, liq, LEVERAGE, margin))
+    except Exception as e:
+        print("小教室失敗:", e)
 
 
 def take_tp(s, level):
@@ -320,6 +463,12 @@ def close_position(s, price, why, liquidated=False):
            f"進場:{p['entry']:,.2f} → 最後出場:{price:,.2f}{extra}\n整筆損益:{pnl:+.2f} USDT\n"
            f"目前資金:{s['cash']:.2f} USDT(本金 {START_CASH:.0f})\n"
            f"累計:{s['wins']} 勝 / {s['losses']} 敗,勝率 {s['wins'] / total * 100:.1f}%\n{tier_text(s)}")
+    try:
+        notify(lesson_close_text(p, pnl, why, hit, s))
+        send_photo(make_chart(p, price, pnl, why),
+                   "📈 複盤圖:Entry=進場 SL=停損 TP=停利 X=出場;紅K=收漲、綠K=收跌;細線是 EMA20/EMA50")
+    except Exception as e:
+        print("小教室失敗:", e)
 
 
 def process_bar(s, high, low):
@@ -497,6 +646,7 @@ def run_once():
     s = load_state()
     w = win(s)
     df = add_indicators(get_klines())
+    _CTX["df"] = df
     price = df.iloc[-1]["close"]
     if s["position"]:
         check_exit(s, df)
@@ -749,4 +899,3 @@ if __name__ == "__main__":
             time.sleep(60)
     else:
         run_once()
-
