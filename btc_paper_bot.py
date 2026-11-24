@@ -8,10 +8,11 @@ BTC 虛擬資金自動交易機器人 (Paper Trading) v3 - GitHub Actions 單次
 - 三段停利 (TP1/TP2/TP3) + 保本移動停損;達標的那一段先落袋,不用等最終目標
 - 每次開倉/平倉、每 6 小時回報(做了什麼、為什麼沒開單)、持倉每 3 小時回報浮動損益
 - Telegram 傳 /status 查目前狀態 (下次排程執行時回覆)
+- 每單平倉後自動製作「AI 虛擬老師」複盤影片 (中文語音 + 字幕) 傳到 Telegram;傳 /demo 可先看示範影片
 - 回測:python btc_paper_bot.py --backtest 60  (用過去 60 天歷史行情驗證策略與槓桿)
 - 測試通知:python btc_paper_bot.py --test
 """
-import os, sys, time, csv, json
+import os, sys, re, time, csv, json, shutil, subprocess, tempfile, wave
 from datetime import datetime, timezone, timedelta
 import requests
 import pandas as pd
@@ -285,22 +286,25 @@ def lesson_open_text(side, trend, hits, misses, price, stop, liq, lev, margin):
     return "\n".join(L)
 
 
-def lesson_close_text(p, pnl, why, hit, s):
+def close_what(p, why):
     lev = p.get("lev", 1)
     if why == "爆倉":
         liq = abs(p["entry"] - p.get("liq", p["entry"])) / p["entry"] * 100
-        stp = abs(p["entry"] - p["stop"]) / p["entry"] * 100
-        what = (f"{lev}x 槓桿的爆倉距離只有約 {liq:.2f}%,停損距離是 {stp:.2f}%。價格逆行一點點就先被清掉,"
+        stp = abs(p["entry"] - p.get("stop0", p["stop"])) / p["entry"] * 100
+        return (f"{lev} 倍槓桿的爆倉距離只有約 {liq:.2f}%,停損距離是 {stp:.2f}%。價格逆行一點點就先被清掉,"
                 "保證金歸零。這是高槓桿最大的風險:停損還沒用到,就先被強制平倉了。")
-    elif why == "保本出場":
-        what = "TP1 先落袋後,價格回頭碰到保本停損,剩下的倉位沒賺沒賠,整筆仍小賺。這就是「先落袋、再移動停損」的好處。"
-    elif why == "移動停損出場":
-        what = "前面已經落袋 TP1、TP2,價格回頭後被移動停損收掉剩下的倉位,大部分獲利被留住了。"
-    elif why.startswith("觸及停利"):
-        what = "價格一路走到最遠的停利目標,趨勢延續得很漂亮。順勢加上分批停利,這是理想的結果。"
-    else:
-        what = ("價格往反方向走到你事先設好的認錯價,系統自動出場。這筆虧損在計畫內,"
-                "停損的用途就是不讓小虧變成大虧。")
+    if why == "保本出場":
+        return "TP1 先落袋後,價格回頭碰到保本停損,剩下的倉位沒賺沒賠,整筆仍小賺。這就是「先落袋、再移動停損」的好處。"
+    if why == "移動停損出場":
+        return "前面已經落袋 TP1、TP2,價格回頭後被移動停損收掉剩下的倉位,大部分獲利被留住了。"
+    if why.startswith("觸及停利"):
+        return "價格一路走到最遠的停利目標,趨勢延續得很漂亮。順勢加上分批停利,這是理想的結果。"
+    return ("價格往反方向走到你事先設好的認錯價,系統自動出場。這筆虧損在計畫內,"
+            "停損的用途就是不讓小虧變成大虧。")
+
+
+def lesson_close_text(p, pnl, why, hit, s):
+    what = close_what(p, why)
     total = s["wins"] + s["losses"]
     L = [f"📚 【複盤小教室】這單{'賺' if pnl > 0 else '虧'} {pnl:+.2f} USDT", "",
          f"發生什麼事:{what}"]
@@ -385,7 +389,7 @@ def open_position(s, ev, price):
     s["cash"] -= margin + notional * FEE
     reason = why_text(ev)
     s["position"] = {"side": side, "entry": price, "qty": qty, "rem": qty, "margin": margin,
-                     "lev": LEVERAGE, "stop": stop, "tps": tps, "fracs": fracs, "target": tps[-1],
+                     "lev": LEVERAGE, "stop": stop, "stop0": stop, "tps": tps, "fracs": fracs, "target": tps[-1],
                      "tp_hit": 0, "realized": 0.0, "liq": liq, "score": ev["score"],
                      "hits": ev["hits"], "misses": ev["misses"], "trend": ev["trend"],
                      "time": now(), "ts": int(time.time() * 1000), "reason": reason}
@@ -465,8 +469,9 @@ def close_position(s, price, why, liquidated=False):
            f"累計:{s['wins']} 勝 / {s['losses']} 敗,勝率 {s['wins'] / total * 100:.1f}%\n{tier_text(s)}")
     try:
         notify(lesson_close_text(p, pnl, why, hit, s))
-        send_photo(make_chart(p, price, pnl, why),
-                   "📈 複盤圖:Entry=進場 SL=停損 TP=停利 X=出場;紅K=收漲、綠K=收跌;細線是 EMA20/EMA50")
+        chart = make_chart(p, price, pnl, why)
+        send_photo(chart, "📈 複盤圖:Entry=進場 SL=停損 TP=停利 X=出場;紅K=收漲、綠K=收跌;細線是 EMA20/EMA50")
+        send_lesson_video(trade_info(p, price, pnl, why, hit, s, chart))
     except Exception as e:
         print("小教室失敗:", e)
 
@@ -604,19 +609,28 @@ def get_tg_updates(offset):
 
 
 def handle_commands(s, price):
+    """讀取 Telegram 訊息。/status 回報狀態;/demo 製作示範影片 (下次執行時處理)。只回應自己的 chat id。"""
     if not (TG_TOKEN and TG_CHAT_ID):
         return
     try:
-        wanted = False
+        cmds = set()
         for u in get_tg_updates(s.get("tg_offset", 0)):
             s["tg_offset"] = u["update_id"] + 1
             m = u.get("message") or {}
-            if str(m.get("chat", {}).get("id")) == str(TG_CHAT_ID) and \
-                    str(m.get("text", "")).strip().lower().startswith("/status"):
-                wanted = True
+            if str(m.get("chat", {}).get("id")) != str(TG_CHAT_ID):
+                continue
+            txt = str(m.get("text", "")).strip().lower()
+            if txt.startswith("/status"):
+                cmds.add("status")
+            elif txt.startswith("/demo"):
+                cmds.add("demo")
+        if "demo" in cmds:
+            s["demo_video"] = True
         save_state(s)
-        if wanted:
+        if "status" in cmds:
             notify(status_text(s, price))
+        if "demo" in cmds:
+            notify("🎬 收到 /demo,示範影片製作中,約 1~3 分鐘後送到。")
     except Exception as e:
         print("讀取指令失敗:", e)
 
@@ -641,6 +655,394 @@ def log_line(s, df, price):
             fh.write(line + "\n")
 
 
+# ---------- AI 虛擬老師複盤影片 ----------
+LESSON_VIDEO = True     # 平倉後自動製作老師複盤影片 (首次會自動安裝 edge-tts / ffmpeg / 中文字型,約多 1~2 分鐘)
+VIDEO_W, VIDEO_H, VIDEO_FPS = 1280, 720, 12
+VOICES = {"A": "zh-TW-HsiaoChenNeural", "B": "zh-TW-HsiaoYuNeural"}
+TEACHER_NAMES = {"A": "主講老師", "B": "助教老師"}
+_TOOLS = {}
+
+
+def _pip(*pkgs):
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", *pkgs], capture_output=True)
+
+
+def find_cjk_font():
+    try:
+        out = subprocess.run(["fc-list", ":lang=zh-tw", "file"], capture_output=True, text=True).stdout
+        files = [l.split(":")[0].strip() for l in out.splitlines() if l.strip()]
+        files = [f for f in files if os.path.exists(f)]
+        reg = [f for f in files if "Bold" not in f and "Black" not in f]
+        sans = [f for f in reg if "Sans" in f or "Hei" in f]
+        return (sans or reg or files or [None])[0]
+    except Exception:
+        return None
+
+
+def ensure_video_tools():
+    """找 ffmpeg 與中文字型,缺的話自動安裝 (只在要做影片時才做)。"""
+    if _TOOLS:
+        return _TOOLS
+    ff = shutil.which("ffmpeg")
+    if not ff:
+        try:
+            import imageio_ffmpeg
+        except Exception:
+            _pip("imageio-ffmpeg")
+        try:
+            import imageio_ffmpeg
+            ff = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception as e:
+            print("找不到 ffmpeg:", e)
+    font = find_cjk_font()
+    if not font and shutil.which("sudo"):
+        subprocess.run("sudo -n apt-get update -qq && sudo -n apt-get install -y -qq fonts-noto-cjk",
+                       shell=True, capture_output=True)
+        font = find_cjk_font()
+    try:
+        import edge_tts  # noqa: F401
+    except Exception:
+        _pip("edge-tts")
+    try:
+        import gtts  # noqa: F401
+    except Exception:
+        _pip("gTTS")
+    _TOOLS.update({"ffmpeg": ff, "font": font})
+    return _TOOLS
+
+
+def load_font(path, size):
+    from PIL import ImageFont
+    for idx in (3, 0):  # NotoSansCJK 的 .ttc:3 = 繁體中文字形
+        try:
+            return ImageFont.truetype(path, size, index=idx)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def wrap(text, font, maxw):
+    lines, cur = [], ""
+    for ch in text:
+        if cur and font.getlength(cur + ch) > maxw:
+            lines.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def split_sentences(text, maxlen=34):
+    parts = []
+    for seg in re.split(r"(?<=[。!?!?;;])", text):
+        seg = seg.strip()
+        while len(seg) > maxlen:
+            cut = max(seg.rfind(c, 0, maxlen) for c in (",", ",", "、"))
+            if cut < 8:
+                cut = maxlen - 1
+            parts.append(seg[:cut + 1])
+            seg = seg[cut + 1:].strip()
+        if seg:
+            parts.append(seg)
+    return parts
+
+
+def load_teacher(key, size):
+    """讀取 teacher_a / teacher_b 圖片 (jpg/png);沒有就畫簡單的預設頭像。"""
+    from PIL import Image, ImageDraw
+    w, h = size
+    for d in (".", "teachers"):
+        for ext in ("jpg", "jpeg", "png", "webp"):
+            path = os.path.join(d, f"teacher_{key.lower()}.{ext}")
+            if os.path.exists(path):
+                im = Image.open(path).convert("RGB")
+                sc = max(w / im.width, h / im.height)
+                im = im.resize((int(im.width * sc) + 1, int(im.height * sc) + 1), Image.LANCZOS)
+                x, y = (im.width - w) // 2, (im.height - h) // 2
+                return im.crop((x, y, x + w, y + h))
+    im = Image.new("RGB", size, "#3A4A66")
+    dr = ImageDraw.Draw(im)
+    dr.ellipse((w * 0.3, h * 0.16, w * 0.7, h * 0.52), fill="#C9D3E6")
+    dr.ellipse((w * 0.1, h * 0.58, w * 0.9, h * 1.25), fill="#C9D3E6")
+    return im
+
+
+def tts_line(text, voice, out_path):
+    """文字轉語音。edge-tts 失敗就用 gTTS,都失敗回傳 None (影片會改成無聲、只有字幕)。"""
+    try:
+        import asyncio
+        import edge_tts
+        asyncio.run(edge_tts.Communicate(text, voice).save(out_path))
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 500:
+            return out_path
+    except Exception as e:
+        print("edge-tts 失敗:", e)
+    try:
+        from gtts import gTTS
+        gTTS(text, lang="zh-TW").save(out_path)
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 500:
+            return out_path
+    except Exception as e:
+        print("gTTS 失敗:", e)
+    return None
+
+
+def load_audio(path, ffmpeg, sr):
+    import numpy as np
+    wav = path + ".wav"
+    subprocess.run([ffmpeg, "-y", "-loglevel", "error", "-i", path, "-ac", "1", "-ar", str(sr), wav], check=True)
+    with wave.open(wav) as w:
+        return np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+
+
+def trade_info(p, price, pnl, why, hit, s, chart=None, demo=False):
+    lev = p.get("lev", 1)
+    dist = abs(p["entry"] - p.get("stop0", p["stop"])) / p["entry"] * 100
+    liq_dist = abs(p["entry"] - p["liq"]) / p["entry"] * 100 if p.get("liq") else 100.0
+    total = max(s["wins"] + s["losses"], 1)
+    return {"side": p.get("side", "long"), "lev": lev, "entry": p["entry"], "exit": price, "pnl": pnl,
+            "why": why, "hit": hit, "score": p.get("score", "?"), "trend": p.get("trend", "順勢"),
+            "hits": p.get("hits", []), "misses": p.get("misses", []), "dist": dist, "liq_dist": liq_dist,
+            "loss_pct": dist * lev, "what": close_what(p, why), "tip": TIPS[(total - 1) % len(TIPS)],
+            "chart": chart, "demo": demo}
+
+
+def build_script(t):
+    nm = "做多" if t["side"] == "long" else "做空"
+    res = "賺" if t["pnl"] > 0 else "虧"
+    L = []
+
+    def add(who, slide, text):
+        L.extend((who, slide, part) for part in split_sentences(text))
+
+    add("A", 0, "大家好,我是 AI 虛擬老師。" + ("這是一支示範影片,內容不是真實交易。" if t.get("demo") else "我們來複盤剛剛這一單。"))
+    add("B", 0, f"這一單是{nm},{t['lev']} 倍槓桿,結果{res}了 {abs(t['pnl']):.2f} 個 USDT。")
+    add("A", 1, "先看這張圖。三角形是進場,叉叉是出場,紅色虛線是停損,綠色虛線是停利。")
+    add("B", 2, "那為什麼會開這一單呢?")
+    hits = "、".join(t["hits"][:3]) or "沒有額外確認"
+    add("A", 2, f"因為大方向是{t['trend']},六項確認裡符合了 {t['score']} 項,像是{hits}。")
+    add("B", 3, "那風險有多大呢?")
+    add("A", 3, f"停損離進場大約百分之 {t['dist']:.1f}。在 {t['lev']} 倍槓桿下,碰到停損,大約會虧掉保證金的百分之 {t['loss_pct']:.0f}。")
+    if t["liq_dist"] < t["dist"]:
+        add("B", 3, "而且爆倉價比停損還近,所以要特別小心。")
+    add("A", 0, t["what"])
+    add("B", 4, "今天的重點:" + t["tip"])
+    add("A", 4, "記得,這是模擬練習,結果不代表未來。我們下次見!")
+    return L
+
+
+def render_scene(t, slide, text, who, F, chart_im):
+    """畫一個鏡頭的靜態畫面 (不含會動的老師與音波)。"""
+    from PIL import Image, ImageDraw
+    W, H = VIDEO_W, VIDEO_H
+    im = Image.new("RGB", (W, H), "#0F1724")
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle((30, 28, 190, 64), 18, fill="#3D5AFE")
+    d.text((110, 46), "AI 虛擬老師", font=F[26], fill="#FFFFFF", anchor="mm")
+    for key, x in (("A", 30), ("B", 290)):
+        d.text((x + 115, 392), TEACHER_NAMES[key], font=F[30], fill="#C9D3E6", anchor="mm")
+    px, py, pw, ph = 560, 40, 680, 520
+    d.rounded_rectangle((px, py, px + pw, py + ph), 18, fill="#1B2536")
+
+    def title(s_):
+        d.text((px + 30, py + 24), s_, font=F[44], fill="#FFD166")
+
+    def row(y, s_, fill="#FFFFFF", f=34):
+        d.text((px + 30, y), s_, font=F[f], fill=fill)
+
+    pnl = t["pnl"]
+    nm = "做多" if t["side"] == "long" else "做空"
+    if slide == 0:
+        title("複盤小教室" + ("(示範)" if t.get("demo") else ""))
+        d.text((px + 30, py + 100), f"{'賺' if pnl > 0 else '虧'} {pnl:+.2f} USDT", font=F[64],
+               fill="#FFD166" if pnl > 0 else "#9AA7BD")
+        row(py + 210, f"{nm}  {t['lev']} 倍槓桿")
+        row(py + 262, f"進場 {t['entry']:,.0f}  →  出場 {t['exit']:,.0f}")
+        row(py + 314, f"結束原因:{t['why']}")
+        if t["hit"]:
+            row(py + 366, f"已先落袋 TP1" + (f"~TP{t['hit']}" if t["hit"] > 1 else ""), "#4ADE80")
+    elif slide == 1:
+        title("複盤圖")
+        if chart_im is not None:
+            c = chart_im.copy()
+            c.thumbnail((pw - 40, ph - 100))
+            im.paste(c, (px + (pw - c.width) // 2, py + 90 + (ph - 100 - c.height) // 2))
+        else:
+            row(py + 200, "(這單沒有複盤圖)", "#9AA7BD")
+    elif slide == 2:
+        title("為什麼開這單?")
+        row(py + 92, f"大方向:{t['trend']}", "#FFFFFF", 32)
+        names = list(t["hits"]) + list(t["misses"])
+        for k, nme in enumerate(names[:6]):
+            ok = k < len(t["hits"])
+            row(py + 150 + k * 52, ("●  " if ok else "○  ") + nme, "#4ADE80" if ok else "#7C8AA5", 32)
+    elif slide == 3:
+        title("風險有多大?")
+        mx = max(t["dist"], t["liq_dist"], 0.01) * 1.15
+        for k, (lab, val, col) in enumerate((("停損距離", t["dist"], "#FFD166"), ("爆倉距離", t["liq_dist"], "#FF6B6B"))):
+            y = py + 110 + k * 110
+            row(y, f"{lab}  {val:.2f}%", "#FFFFFF", 32)
+            d.rounded_rectangle((px + 30, y + 56, px + 30 + max(8, int(560 * val / mx)), y + 84), 8, fill=col)
+        row(py + 350, f"碰到停損約虧保證金 {t['loss_pct']:.0f}%", "#FFFFFF", 34)
+        if t["liq_dist"] < t["dist"]:
+            row(py + 410, "爆倉價比停損還近,會先爆倉!", "#FF6B6B", 32)
+    else:
+        title("今日重點")
+        for k, ln in enumerate(wrap(t["tip"], F[38], pw - 60)[:7]):
+            row(py + 110 + k * 62, ln, "#FFFFFF", 38)
+    im = im.convert("RGBA")
+    ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    od = ImageDraw.Draw(ov)
+    od.rectangle((0, 590, W, H), fill=(0, 0, 0, 185))
+    im = Image.alpha_composite(im, ov).convert("RGB")
+    d = ImageDraw.Draw(im)
+    lines = wrap(text, F[34], W - 140)[:3]
+    y0 = 590 + (H - 590 - len(lines) * 44) // 2
+    for k, ln in enumerate(lines):
+        d.text((W // 2, y0 + k * 44 + 22), ln, font=F[34], fill="#FFFFFF", anchor="mm")
+    return im
+
+
+def make_lesson_video(t, out="lesson.mp4"):
+    """做出一支老師複盤影片 (MP4)。失敗回傳 None。"""
+    tools = ensure_video_tools()
+    if not tools.get("ffmpeg") or not tools.get("font"):
+        print("缺少 ffmpeg 或中文字型,略過影片:", tools)
+        return None
+    import math
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageEnhance
+    F = {sz: load_font(tools["font"], sz) for sz in (26, 30, 32, 34, 38, 44, 64)}
+    chart_im = Image.open(t["chart"]).convert("RGB") if t.get("chart") and os.path.exists(t["chart"]) else None
+    tmp = tempfile.mkdtemp()
+    sr = 24000
+    gap = np.zeros(int(0.25 * sr), dtype=np.int16)
+    parts, spans, cursor = [], [], 0.0
+    for k, (who, slide, text) in enumerate(build_script(t)):
+        mp3 = tts_line(text, VOICES[who], os.path.join(tmp, f"l{k}.mp3"))
+        audio = None
+        if mp3:
+            try:
+                audio = load_audio(mp3, tools["ffmpeg"], sr)
+            except Exception as e:
+                print("音檔轉換失敗:", e)
+        syn = audio is None or len(audio) < sr * 0.2
+        if syn:  # 沒有語音:依字數估算停留時間,畫面仍有字幕
+            audio = np.zeros(int(max(1.8, 0.30 * len(text)) * sr), dtype=np.int16)
+        spans.append((cursor, cursor + len(audio) / sr, who, slide, text, syn))
+        parts += [audio, gap]
+        cursor += len(audio) / sr + 0.25
+    parts.append(np.zeros(int(0.8 * sr), dtype=np.int16))
+    pcm = np.concatenate(parts)
+    wav_path = os.path.join(tmp, "all.wav")
+    with wave.open(wav_path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(pcm.tobytes())
+    nframes = int((len(pcm) / sr) * VIDEO_FPS) + 1
+    win = int(sr / VIDEO_FPS)
+    raw = np.array([np.sqrt(np.mean(pcm[i * win:(i + 1) * win].astype(np.float64) ** 2) + 1e-9)
+                    if i * win < len(pcm) else 0.0 for i in range(nframes)])
+    voiced = raw[raw > 50]
+    ref = np.percentile(voiced, 90) if len(voiced) else 1.0
+    env = np.clip(raw / max(ref, 1.0), 0, 1)
+    scenes = {}
+    cw, ch = 230, 276
+    port = {k: load_teacher(k, (cw, ch)) for k in "AB"}
+    dim = {k: ImageEnhance.Brightness(im).enhance(0.55) for k, im in port.items()}
+    cmd = [tools["ffmpeg"], "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+           "-s", f"{VIDEO_W}x{VIDEO_H}", "-r", str(VIDEO_FPS), "-i", "-", "-i", wav_path,
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "27", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", "96k", "-shortest", "-movflags", "+faststart", out]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    si = 0
+    try:
+        for f in range(nframes):
+            tm = f / VIDEO_FPS
+            while si < len(spans) - 1 and tm >= spans[si][1] + 0.25:
+                si += 1
+            st, en, who, slide, text, syn = spans[si]
+            speaking = st <= tm < en
+            e = float(env[f]) if not syn else (0.55 + 0.45 * abs(math.sin(f * 1.9)) if speaking else 0.0)
+            if not speaking and not syn:
+                e = 0.0
+            if si not in scenes:
+                scenes[si] = render_scene(t, slide, text, who, F, chart_im)
+            frame = scenes[si].copy()
+            dr = ImageDraw.Draw(frame)
+            for key, x in (("A", 30), ("B", 290)):
+                active = (key == who)
+                img = port[key] if (active or not speaking) else dim[key]
+                yo = -int(e * 9) if (active and speaking) else 0
+                frame.paste(img, (x, 100 + yo))
+                if active and speaking:
+                    wdt = 3 + int(e * 6)
+                    dr.rectangle((x - wdt, 100 + yo - wdt, x + cw + wdt, 100 + yo + ch + wdt), outline="#FFD166", width=wdt)
+            for i in range(20):
+                hh = int(e * (0.3 + 0.7 * abs(math.sin(f * 0.8 + i * 0.9))) * 110) + 4
+                dr.rounded_rectangle((30 + i * 25, 560 - hh, 30 + i * 25 + 16, 560), 4, fill="#FFD166" if speaking else "#33415C")
+            proc.stdin.write(frame.tobytes())
+        proc.stdin.close()
+        proc.wait(timeout=300)
+    except Exception as ex:
+        print("影片合成失敗:", ex, proc.stderr.read().decode(errors="ignore")[-500:] if proc.stderr else "")
+        return None
+    if proc.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) < 1000:
+        print("ffmpeg 失敗:", proc.stderr.read().decode(errors="ignore")[-500:] if proc.stderr else "")
+        return None
+    return out
+
+
+def send_video(path, caption=""):
+    if not (path and TG_TOKEN and TG_CHAT_ID):
+        return
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendVideo",
+                              data={"chat_id": TG_CHAT_ID, "caption": caption[:1000], "supports_streaming": "true",
+                                    "width": VIDEO_W, "height": VIDEO_H},
+                              files={"video": f}, timeout=180)
+        if r.status_code != 200:
+            print("影片發送失敗:", r.status_code, r.text)
+    except Exception as e:
+        print("影片發送失敗:", e)
+
+
+def send_lesson_video(t):
+    if not (LESSON_VIDEO and TG_TOKEN and TG_CHAT_ID):
+        return
+    try:
+        path = make_lesson_video(t)
+        if path:
+            send_video(path, "🎬 AI 虛擬老師複盤影片(模擬練習,非投資建議)")
+            os.remove(path)
+        else:
+            print("這次沒有產生影片 (已略過)。")
+    except Exception as e:
+        print("老師影片失敗:", e)
+
+
+def send_demo_video(df, price):
+    """/demo:用最近的行情做一支示範影片,讓你先看看效果。"""
+    c = df.iloc[-1]
+    entry = float(df.iloc[-30]["close"])
+    atr = float(c["atr"])
+    stop = entry - ATR_MULT * atr
+    tps = [entry + k * ATR_MULT * atr for k in TP_R]
+    p = {"side": "long", "lev": LEVERAGE, "entry": entry, "stop": stop, "stop0": stop, "tps": tps,
+         "liq": entry * (1 - (1 / LEVERAGE - MMR)), "score": 5, "trend": "多頭",
+         "hits": ["EMA200 順勢", "MACD 同向", "斐波那契回撤區", "K 線確認", "量能放大"], "misses": ["RSI 回檔轉強"],
+         "ts": int(df.iloc[-30]["t"]), "time": now(), "reason": "示範", "tp_hit": 3}
+    exit_price = tps[-1]
+    pnl = 3.21
+    chart = make_chart(p, exit_price, pnl, "觸及停利 TP3")
+    t = trade_info(p, exit_price, pnl, "觸及停利 TP3", 2, {"wins": 3, "losses": 1}, chart, demo=True)
+    send_lesson_video(t)
+
+
 # ---------- 主流程 ----------
 def run_once():
     s = load_state()
@@ -651,6 +1053,9 @@ def run_once():
     if s["position"]:
         check_exit(s, df)
     handle_commands(s, price)
+    if s.pop("demo_video", None):
+        save_state(s)
+        send_demo_video(df, price)
     if s["position"]:
         maybe_report(s, price)
 
