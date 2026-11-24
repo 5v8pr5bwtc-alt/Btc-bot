@@ -41,7 +41,7 @@
   },
   "wins": 4,
   "losses": 5,
-  "last_bar": 1795560300000,
+  "last_bar": 1795563000000,
   "tg_offset": 127778739,
   "last_report": 1795561552.7399154,
   "win": {
@@ -49,7 +49,7 @@
     "bars": 0,
     "flat": 0,
     "weak": 0,
-    "held": 0,
+    "held": 3,
     "stale": 0,
     "best": null,
     "opens": [],
