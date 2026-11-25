@@ -323,7 +323,11 @@ def make_chart(p, exit_price, pnl, why, path="trade_chart.png"):
     if df is None:
         return None
     try:
-        import matplotlib
+        try:
+            import matplotlib
+        except Exception:
+            _pip("matplotlib")
+            import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except Exception as e:
@@ -661,6 +665,7 @@ VIDEO_W, VIDEO_H, VIDEO_FPS = 1280, 720, 12
 VOICES = {"A": "zh-TW-HsiaoChenNeural", "B": "zh-TW-HsiaoYuNeural"}
 TEACHER_NAMES = {"A": "主講老師", "B": "助教老師"}
 _TOOLS = {}
+_VIDEO_ERR = [""]
 
 
 def _pip(*pkgs):
@@ -683,6 +688,11 @@ def ensure_video_tools():
     """找 ffmpeg 與中文字型,缺的話自動安裝 (只在要做影片時才做)。"""
     if _TOOLS:
         return _TOOLS
+    for mod, pkg in (("PIL", "pillow"), ("numpy", "numpy")):
+        try:
+            __import__(mod)
+        except Exception:
+            _pip(pkg)
     ff = shutil.which("ffmpeg")
     if not ff:
         try:
@@ -909,7 +919,8 @@ def make_lesson_video(t, out="lesson.mp4"):
     """做出一支老師複盤影片 (MP4)。失敗回傳 None。"""
     tools = ensure_video_tools()
     if not tools.get("ffmpeg") or not tools.get("font"):
-        print("缺少 ffmpeg 或中文字型,略過影片:", tools)
+        _VIDEO_ERR[0] = f"缺少影片工具:ffmpeg {'有' if tools.get('ffmpeg') else '沒有'}、中文字型 {'有' if tools.get('font') else '沒有'}"
+        print(_VIDEO_ERR[0])
         return None
     import math
     import numpy as np
@@ -988,10 +999,12 @@ def make_lesson_video(t, out="lesson.mp4"):
         proc.stdin.close()
         proc.wait(timeout=300)
     except Exception as ex:
-        print("影片合成失敗:", ex, proc.stderr.read().decode(errors="ignore")[-500:] if proc.stderr else "")
+        _VIDEO_ERR[0] = f"影片合成失敗:{ex}"
+        print(_VIDEO_ERR[0], proc.stderr.read().decode(errors="ignore")[-500:] if proc.stderr else "")
         return None
     if proc.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) < 1000:
-        print("ffmpeg 失敗:", proc.stderr.read().decode(errors="ignore")[-500:] if proc.stderr else "")
+        _VIDEO_ERR[0] = "ffmpeg 轉檔失敗:" + (proc.stderr.read().decode(errors="ignore")[-200:] if proc.stderr else "")
+        print(_VIDEO_ERR[0])
         return None
     return out
 
@@ -1007,8 +1020,10 @@ def send_video(path, caption=""):
                               files={"video": f}, timeout=180)
         if r.status_code != 200:
             print("影片發送失敗:", r.status_code, r.text)
+            notify(f"⚠️ 影片做好了,但 Telegram 拒收:{r.status_code} {r.text[:150]}")
     except Exception as e:
         print("影片發送失敗:", e)
+        notify(f"⚠️ 影片做好了,但傳送失敗:{type(e).__name__}: {str(e)[:150]}")
 
 
 def send_lesson_video(t):
@@ -1020,9 +1035,10 @@ def send_lesson_video(t):
             send_video(path, "🎬 AI 虛擬老師複盤影片(模擬練習,非投資建議)")
             os.remove(path)
         else:
-            print("這次沒有產生影片 (已略過)。")
+            notify("⚠️ 這次沒有產生老師影片。原因:" + (_VIDEO_ERR[0] or "未知,請看 Actions 的執行紀錄"))
     except Exception as e:
         print("老師影片失敗:", e)
+        notify(f"⚠️ 老師影片製作失敗:{type(e).__name__}: {str(e)[:200]}")
 
 
 def send_demo_video(df, price):
