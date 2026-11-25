@@ -759,19 +759,34 @@ def split_sentences(text, maxlen=34):
     return parts
 
 
-def load_teacher(key, size):
-    """讀取 teacher_a / teacher_b 圖片 (jpg/png);沒有就畫簡單的預設頭像。"""
-    from PIL import Image, ImageDraw
-    w, h = size
+def teacher_path(key):
+    """找老師圖片:優先 teacher_a / teacher_b;找不到就用倉庫根目錄的圖片檔 (依檔名排序,第 1 張=主講、第 2 張=助教)。"""
     for d in (".", "teachers"):
         for ext in ("jpg", "jpeg", "png", "webp"):
             path = os.path.join(d, f"teacher_{key.lower()}.{ext}")
             if os.path.exists(path):
-                im = Image.open(path).convert("RGB")
-                sc = max(w / im.width, h / im.height)
-                im = im.resize((int(im.width * sc) + 1, int(im.height * sc) + 1), Image.LANCZOS)
-                x, y = (im.width - w) // 2, (im.height - h) // 2
-                return im.crop((x, y, x + w, y + h))
+                return path
+    imgs = sorted(f for f in os.listdir(".")
+                  if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+                  and not f.lower().startswith(("trade_chart", "teacher_", "lesson")))
+    idx = 0 if key == "A" else 1
+    return imgs[idx] if len(imgs) > idx else None
+
+
+def load_teacher(key, size):
+    """讀取老師圖片 (cover 裁切,偏向保留上半部的臉);沒有圖片就畫簡單的預設頭像。"""
+    from PIL import Image, ImageDraw
+    w, h = size
+    path = teacher_path(key)
+    if path:
+        try:
+            im = Image.open(path).convert("RGB")
+            sc = max(w / im.width, h / im.height)
+            im = im.resize((int(im.width * sc) + 1, int(im.height * sc) + 1), Image.LANCZOS)
+            x, y = (im.width - w) // 2, int((im.height - h) * 0.2)
+            return im.crop((x, y, x + w, y + h))
+        except Exception as e:
+            print("老師圖片讀取失敗:", path, e)
     im = Image.new("RGB", size, "#3A4A66")
     dr = ImageDraw.Draw(im)
     dr.ellipse((w * 0.3, h * 0.16, w * 0.7, h * 0.52), fill="#C9D3E6")
