@@ -3,14 +3,14 @@
   "position": null,
   "wins": 5,
   "losses": 6,
-  "last_bar": 1795586400000,
-  "tg_offset": 127778740,
+  "last_bar": 1795587300000,
+  "tg_offset": 127778741,
   "last_report": 1795575024.9157205,
   "win": {
     "start": 1795585411.6310413,
-    "bars": 3,
+    "bars": 4,
     "flat": 0,
-    "weak": 3,
+    "weak": 4,
     "held": 0,
     "stale": 0,
     "best": {
